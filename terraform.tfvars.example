@@ -1,0 +1,54 @@
+# ==============================================================================
+# terraform.tfvars
+# Preencha os valores abaixo para o seu ambiente.
+#
+# SEGURANÇA: Este arquivo contém o token do Telegram.
+#   → Adicione ao .gitignore: echo "terraform.tfvars" >> .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Projeto GCP
+# ------------------------------------------------------------------------------
+project_id = "projeto-aqui" # ex: minha-empresa-prod
+region     = "us-east1"     # ex: southamerica-east1 (São Paulo)
+zone       = "us-east1-c"   # ex: southamerica-east1-b
+
+# ------------------------------------------------------------------------------
+# VM de Origem (E2 a ser migrada)
+# ------------------------------------------------------------------------------
+source_instance_name = "teste-e2-n4" # ex: app-server-prod
+
+# ------------------------------------------------------------------------------
+# Rede
+# ------------------------------------------------------------------------------
+network                   = ""                      # vazio = herda da VM E2 automaticamente
+subnetwork                = ""                      # vazio = herda da VM E2 automaticamente
+
+# ------------------------------------------------------------------------------
+# Dimensionamento da VM N4 de Destino
+# ------------------------------------------------------------------------------
+# O script resolve automaticamente o tipo de máquina N4 a partir de vcpus + memory_gb.
+# Se a combinação bater exatamente com um tipo predefinido, ele é usado.
+# Caso contrário, o tipo n4-custom é gerado automaticamente.
+#
+# Exemplos de tipos predefinidos:
+#   2 vCPUs +   8 GB → n4-standard-2   |  2 vCPUs +  16 GB → n4-highmem-2
+#   4 vCPUs +  16 GB → n4-standard-4   |  4 vCPUs +  32 GB → n4-highmem-4
+#   8 vCPUs +  32 GB → n4-standard-8   |  8 vCPUs +  64 GB → n4-highmem-8
+#  16 vCPUs +  64 GB → n4-standard-16  | 16 vCPUs + 128 GB → n4-highmem-16
+#  32 vCPUs + 128 GB → n4-standard-32  | 32 vCPUs + 256 GB → n4-highmem-32
+
+target_vcpus     = 2 # número de vCPUs desejados na VM N4
+target_memory_gb = 8 # memória RAM em GB — exemplo: 2 vCPU + 16 GB = n4-highmem-2
+
+# Opcional: defina o tipo diretamente para ignorar a resolução automática acima.
+# machine_type_override = ""   # ex: "n4-standard-4", "n4-highmem-8"
+
+# ------------------------------------------------------------------------------
+# Telegram — Alertas de Migração
+# ------------------------------------------------------------------------------
+# Como obter o token: fale com @BotFather no Telegram → /newbot
+telegram_bot_token = "TOKEN_AQUI" # ex: 7123456789:AAFxxxxxxxxxxxxxxxxxxxxxx
+
+# Como obter o chat_id: adicione @userinfobot a um grupo ou envie /start para ele
+telegram_chat_id = "ID_AQUI" # ex: -1001234567890 (grupo) ou 123456789 (privado)
