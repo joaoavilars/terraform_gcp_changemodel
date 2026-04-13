@@ -37,3 +37,13 @@ output "hyperdisk_self_link" {
   description = "Self-link do disco Hyperdisk-Balanced provisionado"
   value       = google_compute_disk.migration_hyperdisk.self_link
 }
+
+output "discos_secundarios_migrados" {
+  description = "Lista dos discos secundários migrados (nome original → nome Hyperdisk)"
+  value = local.secondary_disk_count > 0 ? [
+    for i in range(local.secondary_disk_count) : {
+      origem    = local.secondary_disk_names[i]
+      hyperdisk = google_compute_disk.secondary_hyperdisk[i].name
+    }
+  ] : []
+}

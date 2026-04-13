@@ -20,6 +20,36 @@ locals {
   start_time_file = "/tmp/tf_migration_${replace(var.project_id, "/", "_")}_start"
 
   # ============================================================================
+  # Discos secundários — extraídos dinamicamente da VM E2 de origem
+  # O data source expõe attached_disk (discos não-boot). Usamos regex para
+  # extrair o nome do disco a partir do self_link, pois o GCP não retorna
+  # o nome diretamente no bloco attached_disk do data source.
+  # ============================================================================
+
+  # Lista de discos anexados (excluindo o boot_disk[0])
+  attached_disks = [
+    for disk in data.google_compute_instance.source_vm.attached_disk : disk
+    if disk.source != data.google_compute_instance.source_vm.boot_disk[0].source
+  ]
+
+  # Quantidade de discos secundários — usada como count nos recursos
+  secondary_disk_count = length(local.attached_disks)
+
+  # Nomes dos discos secundários extraídos via regex do self_link
+  # Formato do self_link: .../zones/ZONE/disks/DISK_NAME
+  secondary_disk_names = [
+    for disk in local.attached_disks : regex("disks/([^/]+)$", disk.source)[0]
+  ]
+
+  # Modo de leitura/escrita e modo de deleção de cada disco secundário
+  secondary_disk_modes = [
+    for disk in local.attached_disks : {
+      mode        = disk.mode
+      auto_delete = disk.auto_delete
+    }
+  ]
+
+  # ============================================================================
   # Resolução automática do tipo de máquina N4
   # Ordem de prioridade:
   #   1. machine_type_override (definido manualmente) — tem precedência total

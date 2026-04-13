@@ -89,6 +89,37 @@ resource "google_compute_snapshot" "migration_snapshot" {
 }
 
 # ==============================================================================
+# PASSO 1.5 — Snapshots dos discos secundários da VM de origem (E2)
+# Cria um snapshot para cada disco anexado que NÃO seja o disco de boot.
+# Usa count para iterar dinamicamente — sem discos secundários, count = 0.
+# ==============================================================================
+resource "google_compute_snapshot" "secondary_disk_snapshot" {
+  count = local.secondary_disk_count
+
+  name    = "${local.secondary_disk_names[count.index]}-migration-snapshot"
+  project = var.project_id
+  zone    = var.zone
+
+  depends_on = [null_resource.notify_migration_start]
+
+  source_disk = local.attached_disks[count.index].source
+
+  storage_locations = [var.region]
+  description       = "Snapshot de migração E2→N4 — disco secundário: ${local.secondary_disk_names[count.index]}"
+
+  labels = {
+    origem     = var.source_instance_name
+    destino    = local.new_instance_name
+    gerenciado = "terraform"
+    tipo       = "migracao-secundario"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# ==============================================================================
 # NOTIFICAÇÃO 2 — Snapshot concluído
 # Dispara quando o snapshot é criado pela primeira vez (trigger muda com o ID).
 # Executa em paralelo com a criação do disco — não bloqueia o próximo passo.
@@ -155,6 +186,34 @@ resource "google_compute_disk" "migration_hyperdisk" {
 }
 
 # ==============================================================================
+# PASSO 2.5 — Discos Hyperdisk-Balanced para discos secundários
+# Cria um Hyperdisk para cada disco secundário a partir do snapshot correspondente.
+# Usa count para iterar dinamicamente — sem discos secundários, count = 0.
+# ==============================================================================
+resource "google_compute_disk" "secondary_hyperdisk" {
+  count = local.secondary_disk_count
+
+  name    = "${local.secondary_disk_names[count.index]}-hyperdisk"
+  project = var.project_id
+  zone    = var.zone
+
+  type = "hyperdisk-balanced"
+
+  # Dependência implícita: aguarda o snapshot do disco secundário correspondente
+  snapshot = google_compute_snapshot.secondary_disk_snapshot[count.index].self_link
+
+  labels = {
+    origem     = var.source_instance_name
+    destino    = local.new_instance_name
+    gerenciado = "terraform"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# ==============================================================================
 # NOTIFICAÇÃO 3 — Disco Hyperdisk criado
 # Executa quando o disco é criado. Avisa que o downtime está prestes a começar.
 # ==============================================================================
@@ -203,8 +262,9 @@ resource "null_resource" "notify_disk_done" {
 resource "null_resource" "stop_and_detach_e2" {
   # Executa sempre para garantir que a E2 está parada e IP liberado
   triggers = {
-    hyperdisk_id = google_compute_disk.migration_hyperdisk.id
-    always_run   = timestamp()
+    hyperdisk_id          = google_compute_disk.migration_hyperdisk.id
+    secondary_disks_ready = join(",", google_compute_disk.secondary_hyperdisk[*].id)
+    always_run            = timestamp()
   }
 
   provisioner "local-exec" {
@@ -287,11 +347,25 @@ resource "google_compute_instance" "migrated_n4_instance" {
   # Permite que o Terraform pare a VM para aplicar mudanças sem recriar o recurso
   allow_stopping_for_update = true
 
+  # Copia as network tags da VM E2 de origem para manter as mesmas regras de firewall
+  tags = data.google_compute_instance.source_vm.tags
+
   # auto_delete = false: disco NÃO é excluído caso a instância seja destruída.
   # Proteção dupla junto com o prevent_destroy no google_compute_disk.
   boot_disk {
     source      = google_compute_disk.migration_hyperdisk.self_link
     auto_delete = false
+  }
+
+  # Discos secundários — anexa todos os Hyperdisks criados a partir dos snapshots
+  # Preserva o modo (rw/ro) original da VM E2; auto_delete não se aplica a
+  # attached_disk com source (disco pré-existente) — o disco não é deletado com a VM.
+  dynamic "attached_disk" {
+    for_each = local.attached_disks
+    content {
+      source = google_compute_disk.secondary_hyperdisk[attached_disk.key].self_link
+      mode   = local.secondary_disk_modes[attached_disk.key].mode
+    }
   }
 
   network_interface {
