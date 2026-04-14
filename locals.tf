@@ -41,11 +41,10 @@ locals {
     for disk in local.attached_disks : regex("disks/([^/]+)$", disk.source)[0]
   ]
 
-  # Modo de leitura/escrita e modo de deleção de cada disco secundário
+  # Modo de leitura/escrita de cada disco secundário
   secondary_disk_modes = [
     for disk in local.attached_disks : {
-      mode        = disk.mode
-      auto_delete = disk.auto_delete
+      mode = disk.mode
     }
   ]
 

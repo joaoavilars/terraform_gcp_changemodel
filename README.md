@@ -46,25 +46,29 @@ telegram_chat_id          = "..."
 
 ### 2. Executar a Migração
 
-Você possui duas opções autônomas (via PowerShell ou Bash) que garantem as travas de execução, logs amigáveis, limpeza e chamadas locais simultâneas ao Terraform.
+Você possui dois scripts executores que automatizam todo o processo, garantindo as travas de segurança e o tratamento de erros.
 
-**Via Linux/Mac/Git Bash:**
-```bash
-# Validar planejamento preventivo
-./migrate.sh --dry-run
+#### 🐧 Linux / macOS / WSL (Bash)
+O script `migrate.sh` suporta os seguintes argumentos:
 
-# Aplicar migração final
-./migrate.sh
-```
+| Argumento | Atalho | Descrição |
+| :--- | :--- | :--- |
+| `--dry-run` | - | Executa apenas o `terraform plan`. Útil para validar mudanças sem aplicar. |
+| `--yes` | `-y` | Pula a confirmação interativa (Auto-approve). Ideal para automações CI/CD. |
+| `--help` | `-h` | Exibe a mensagem de ajuda com as opções disponíveis. |
 
-**Via Windows PowerShell:**
-```powershell
-# Validar planejamento preventivo
-.\migrate.ps1 -DryRun
+**Exemplo:** `./migrate.sh --dry-run`
 
-# Aplicar migração final
-.\migrate.ps1
-```
+#### 🪟 Windows (PowerShell)
+O script `migrate.ps1` suporta os seguintes argumentos:
+
+| Argumento | Descrição |
+| :--- | :--- |
+| `-DryRun` | Executa apenas o `terraform plan`. |
+| `-AutoApprove` | Pula a confirmação interativa (Auto-approve). |
+| `-Help` | Exibe a mensagem de ajuda. |
+
+**Exemplo:** `.\migrate.ps1 -DryRun`
 
 ## ⚠️ Ações Pós-Migração
 * A antiga VM modelo E2 (agora em uso de um disco órfão) continuará **DESLIGADA**, porém não automaticamente apagada. Esse comportamento evita exclusão acidental. Valide a comunicação e integridade dos serviços dentro da N4 e realize a limpeza do lixo deixado para trás (VM e2 desligada e disco antigo) de forma manual pelo console GCP.
