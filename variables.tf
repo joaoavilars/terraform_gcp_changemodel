@@ -30,39 +30,59 @@ variable "zone" {
 # ------------------------------------------------------------------------------
 
 variable "source_instance_name" {
-  description = "Nome exato da VM E2 a ser migrada para N4"
+  description = "Nome exato da VM de origem a ser migrada"
   type        = string
 }
 
 
 variable "network" {
-  description = "Nome ou self_link da VPC da nova instância N4. Deixe vazio (\"\") para herdar automaticamente da VM E2 de origem."
+  description = "Nome ou self_link da VPC da nova instância. Deixe vazio (\"\") para herdar automaticamente da VM de origem."
   type        = string
   default     = ""
 }
 
 variable "subnetwork" {
-  description = "Nome ou self_link da subrede da nova instância N4. Deixe vazio (\"\") para herdar automaticamente da VM E2 de origem."
+  description = "Nome ou self_link da subrede da nova instância. Deixe vazio (\"\") para herdar automaticamente da VM de origem."
   type        = string
   default     = ""
 }
 
 # ------------------------------------------------------------------------------
-# Dimensionamento da VM N4 de Destino
+# Família e Dimensionamento da VM de Destino
 # ------------------------------------------------------------------------------
 
+variable "target_machine_family" {
+  description = "Família de máquina da VM de destino (n4, n2, n2d, e2, c2, c3, c3d, m1, m3, t2a, t2d)"
+  type        = string
+
+  validation {
+    condition     = contains(["n4", "n2", "n2d", "e2", "c2", "c2d", "c3", "c3d", "m1", "m3", "t2a", "t2d"], var.target_machine_family)
+    error_message = "Família de máquina inválida. Use uma das opções: n4, n2, n2d, e2, c2, c2d, c3, c3d, m1, m3, t2a, t2d."
+  }
+}
+
 variable "target_vcpus" {
-  description = "Número de vCPUs da nova instância N4. O script tenta encontrar um tipo predefinido N4 equivalente; se não houver, usa n4-custom automaticamente."
+  description = "Número de vCPUs da nova instância. O script tenta encontrar um tipo predefinido equivalente; se não houver, usa custom automaticamente."
   type        = number
 }
 
 variable "target_memory_gb" {
-  description = "Quantidade de memória RAM da nova instância N4, em GB inteiro. Combinado com target_vcpus para resolver o tipo de máquina."
+  description = "Quantidade de memória RAM da nova instância, em GB inteiro. Combinado com target_vcpus para resolver o tipo de máquina."
   type        = number
 }
 
 variable "machine_type_override" {
-  description = "Tipo N4 explícito. Se preenchido, ignora a resolução automática por vCPU/RAM e usa este valor diretamente (ex: n4-standard-8, n4-highmem-4)."
+  description = "Tipo de máquina explícito. Se preenchido, ignora a resolução automática por vCPU/RAM e usa este valor diretamente (ex: n4-standard-8, n2-highmem-4)."
+  type        = string
+  default     = ""
+}
+
+# ------------------------------------------------------------------------------
+# Tipo de Disco de Destino
+# ------------------------------------------------------------------------------
+
+variable "target_disk_type" {
+  description = "Tipo de disco para a VM de destino (ex: pd-balanced, pd-ssd, hyperdisk-balanced). Deixe vazio para usar o default da família (hyperdisk-balanced para n4/c3/c3d, pd-balanced para demais)."
   type        = string
   default     = ""
 }

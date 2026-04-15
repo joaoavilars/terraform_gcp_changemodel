@@ -1,13 +1,13 @@
 # ==============================================================================
 # main.tf
-# Recursos de infraestrutura — orquestração completa da migração E2 → N4
+# Recursos de infraestrutura — orquestração completa da migração de VMs GCP
 #
 # Cadeia de dependências gerenciada pelo Terraform:
 #
 #   notify_start ──► snapshot ──► notify_snapshot_done
-#                            └──► disk ──► notify_disk_done
-#                                      └──► stop_and_detach_e2  ◄── DOWNTIME INICIA
-#                                                └──► instância N4              ◄── DOWNTIME ENCERRA
+#                            └──► disk (se tipo mudou) ──► notify_disk_done (se tipo mudou)
+#                                      └──► stop_and_detach_source  ◄── DOWNTIME INICIA
+#                                                └──► instância destino              ◄── DOWNTIME ENCERRA
 #                                                           └──► notify_done
 #
 # NOTA sobre interpolação nos provisioners local-exec:
@@ -24,7 +24,6 @@
 # ==============================================================================
 resource "null_resource" "notify_migration_start" {
   triggers = {
-    # Muda a cada apply — intencionalmente, para sempre notificar o início
     always_run = timestamp()
   }
 
@@ -35,14 +34,16 @@ resource "null_resource" "notify_migration_start" {
       CHAT_ID="${var.telegram_chat_id}"
       HORA=$(date '+%d/%m/%Y %H:%M:%S')
 
-      # Salva timestamp de início para calcular duração ao final da migração
       echo $(date +%s) > "${local.start_time_file}"
+
+      DISK_ACTION="${local.create_new_disk ? "Criar novo disco (" + local.resolved_disk_type + ")" : "Reutilizar disco (" + local.resolved_disk_type + ")"}"
 
       MSG=$(printf '%s\n' \
         "🚀 <b>MIGRAÇÃO INICIADA</b>" \
         "━━━━━━━━━━━━━━━━━━━━━━━━" \
-        "🖥  Origem : <code>${var.source_instance_name}</code>  (E2)" \
-        "🎯 Destino: <code>${local.new_instance_name}</code>  (${local.resolved_machine_type})" \
+        "🖥  Origem : <code>${var.source_instance_name}</code>" \
+        "🎯 Destino: <code>${local.new_instance_name}</code> (${local.resolved_machine_type})" \
+        "💾 Disco  : $DISK_ACTION" \
         "📋 Projeto: <code>${var.project_id}</code>" \
         "🌍 Zona   : <code>${var.zone}</code>" \
         "⏱  Início : <b>$HORA</b>"
@@ -57,23 +58,20 @@ resource "null_resource" "notify_migration_start" {
 }
 
 # ==============================================================================
-# PASSO 1 — Snapshot do disco de boot da VM de origem (E2)
-# DEPENDÊNCIA EXPLÍCITA: aguarda notify_migration_start (notificação de início).
-# DEPENDÊNCIA IMPLÍCITA: lê boot_disk[0].source do data source da VM de origem.
+# PASSO 1 — Snapshot do disco de boot da VM de origem
+# DEPENDÊNCIA EXPLÍCITA: aguarda notify_migration_start.
+# O snapshot é SEMPRE criado (para segurança), mesmo quando o disco será reutilizado.
 # ==============================================================================
 resource "google_compute_snapshot" "migration_snapshot" {
   name    = local.snapshot_name
   project = var.project_id
-  zone    = var.zone
 
-  # Garante que a notificação de início é enviada antes de qualquer operação
   depends_on = [null_resource.notify_migration_start]
 
-  # O Terraform resolve o URI do disco automaticamente via data source — sem hardcode
   source_disk = data.google_compute_instance.source_vm.boot_disk[0].source
 
   storage_locations = [var.region]
-  description       = "Snapshot de migração E2→N4 — origem: ${var.source_instance_name}"
+  description       = "Snapshot de migração — origem: ${var.source_instance_name} → ${local.new_instance_name}"
 
   labels = {
     origem     = var.source_instance_name
@@ -82,30 +80,28 @@ resource "google_compute_snapshot" "migration_snapshot" {
     tipo       = "migracao"
   }
 
-  # Impede destruição acidental durante o processo de migração
   lifecycle {
     prevent_destroy = true
+    ignore_changes  = [labels]
   }
 }
 
 # ==============================================================================
-# PASSO 1.5 — Snapshots dos discos secundários da VM de origem (E2)
+# PASSO 1.5 — Snapshots dos discos secundários da VM de origem
 # Cria um snapshot para cada disco anexado que NÃO seja o disco de boot.
-# Usa count para iterar dinamicamente — sem discos secundários, count = 0.
 # ==============================================================================
 resource "google_compute_snapshot" "secondary_disk_snapshot" {
   count = local.secondary_disk_count
 
   name    = "${local.secondary_disk_names[count.index]}-migration-snapshot"
   project = var.project_id
-  zone    = var.zone
 
   depends_on = [null_resource.notify_migration_start]
 
   source_disk = local.attached_disks[count.index].source
 
   storage_locations = [var.region]
-  description       = "Snapshot de migração E2→N4 — disco secundário: ${local.secondary_disk_names[count.index]}"
+  description       = "Snapshot de migração — disco secundário: ${local.secondary_disk_names[count.index]}"
 
   labels = {
     origem     = var.source_instance_name
@@ -116,13 +112,12 @@ resource "google_compute_snapshot" "secondary_disk_snapshot" {
 
   lifecycle {
     prevent_destroy = true
+    ignore_changes  = [labels]
   }
 }
 
 # ==============================================================================
 # NOTIFICAÇÃO 2 — Snapshot concluído
-# Dispara quando o snapshot é criado pela primeira vez (trigger muda com o ID).
-# Executa em paralelo com a criação do disco — não bloqueia o próximo passo.
 # ==============================================================================
 resource "null_resource" "notify_snapshot_done" {
   triggers = {
@@ -136,6 +131,8 @@ resource "null_resource" "notify_snapshot_done" {
       CHAT_ID="${var.telegram_chat_id}"
       HORA=$(date '+%d/%m/%Y %H:%M:%S')
 
+      DISK_MSG="${local.create_new_disk ? "▶ Criando disco " + local.resolved_disk_type + "..." : "▶ Disco sera reutilizado — nenhum disco novo necessario."}"
+
       MSG=$(printf '%s\n' \
         "✅ <b>Passo 1/3 — Snapshot criado</b>" \
         "━━━━━━━━━━━━━━━━━━━━━━━━" \
@@ -143,7 +140,7 @@ resource "null_resource" "notify_snapshot_done" {
         "📍 Região: <code>${var.region}</code>" \
         "⏱  Hora  : <b>$HORA</b>" \
         "" \
-        "▶ Criando disco Hyperdisk-Balanced..."
+        "$DISK_MSG"
       )
 
       curl -s -X POST "${local.telegram_api_url}" \
@@ -155,23 +152,29 @@ resource "null_resource" "notify_snapshot_done" {
 }
 
 # ==============================================================================
-# PASSO 2 — Disco Hyperdisk-Balanced para a nova instância N4
-# DEPENDÊNCIA IMPLÍCITA: aguarda o snapshot via 'snapshot = ...self_link'.
-# O Terraform ordena a criação automaticamente por essa referência.
-# Tipo 'hyperdisk-balanced' é obrigatório — pd-* não é suportado em N4.
+# PASSO 2 — Disco de boot para a nova instância (CONDICIONAL)
+# Só é criado quando o tipo de disco muda (create_new_disk = true).
+# Quando o tipo é o mesmo, o disco de origem é reutilizado diretamente.
 # ==============================================================================
-resource "google_compute_disk" "migration_hyperdisk" {
+resource "google_compute_disk" "migration_boot_disk" {
+  count = local.create_new_disk ? 1 : 0
+
   name    = local.new_disk_name
   project = var.project_id
   zone    = var.zone
 
-  # Tipo obrigatório para N4: pd-standard e pd-ssd causam falha na criação da instância
-  type = "hyperdisk-balanced"
+  type = local.resolved_disk_type
 
   # Dependência implícita: o disco SÓ é provisionado após o snapshot estar disponível
   snapshot = google_compute_snapshot.migration_snapshot.self_link
 
-  # Garante explicitamente que rotinas de backup automático não sejam vinculadas ao novo disco
+  # GVNIC feature — adicionado quando a família de destino suporta
+  dynamic "guest_os_features" {
+    for_each = local.supports_gvnic ? [1] : []
+    content {
+      type = "GVNIC"
+    }
+  }
 
   labels = {
     origem     = var.source_instance_name
@@ -179,28 +182,33 @@ resource "google_compute_disk" "migration_hyperdisk" {
     gerenciado = "terraform"
   }
 
-  # Proteção crítica: preserva os dados mesmo que a instância seja destruída
   lifecycle {
-    prevent_destroy = true
+    prevent_destroy = false
   }
 }
 
 # ==============================================================================
-# PASSO 2.5 — Discos Hyperdisk-Balanced para discos secundários
-# Cria um Hyperdisk para cada disco secundário a partir do snapshot correspondente.
-# Usa count para iterar dinamicamente — sem discos secundários, count = 0.
+# PASSO 2.5 — Discos secundários (sempre criados a partir de snapshot)
+# Nota: a lógica de reuso se aplica apenas ao disco de boot.
+# Discos secundários são sempre recriados para garantir consistência.
 # ==============================================================================
-resource "google_compute_disk" "secondary_hyperdisk" {
+resource "google_compute_disk" "secondary_disk" {
   count = local.secondary_disk_count
 
-  name    = "${local.secondary_disk_names[count.index]}-hyperdisk"
+  name    = "${local.secondary_disk_names[count.index]}-${local.resolved_disk_type}"
   project = var.project_id
   zone    = var.zone
 
-  type = "hyperdisk-balanced"
+  type = local.resolved_disk_type
 
-  # Dependência implícita: aguarda o snapshot do disco secundário correspondente
   snapshot = google_compute_snapshot.secondary_disk_snapshot[count.index].self_link
+
+  dynamic "guest_os_features" {
+    for_each = local.supports_gvnic ? [1] : []
+    content {
+      type = "GVNIC"
+    }
+  }
 
   labels = {
     origem     = var.source_instance_name
@@ -214,12 +222,13 @@ resource "google_compute_disk" "secondary_hyperdisk" {
 }
 
 # ==============================================================================
-# NOTIFICAÇÃO 3 — Disco Hyperdisk criado
-# Executa quando o disco é criado. Avisa que o downtime está prestes a começar.
+# NOTIFICAÇÃO 3 — Disco criado (CONDICIONAL — só quando disco novo é criado)
 # ==============================================================================
 resource "null_resource" "notify_disk_done" {
+  count = local.create_new_disk ? 1 : 0
+
   triggers = {
-    disk_id = google_compute_disk.migration_hyperdisk.id
+    disk_id = google_compute_disk.migration_boot_disk[0].id
   }
 
   provisioner "local-exec" {
@@ -230,14 +239,14 @@ resource "null_resource" "notify_disk_done" {
       HORA=$(date '+%d/%m/%Y %H:%M:%S')
 
       MSG=$(printf '%s\n' \
-        "✅ <b>Passo 2/3 — Hyperdisk criado</b>" \
+        "✅ <b>Passo 2/3 — Disco criado</b>" \
         "━━━━━━━━━━━━━━━━━━━━━━━━" \
         "💾 Nome: <code>${local.new_disk_name}</code>" \
-        "🔷 Tipo: <code>hyperdisk-balanced</code>" \
+        "🔷 Tipo: <code>${local.resolved_disk_type}</code>" \
         "📍 Zona: <code>${var.zone}</code>" \
         "⏱  Hora: <b>$HORA</b>" \
         "" \
-        "⚠️ Próximo passo: parar a VM E2 e liberar o IP..." \
+        "⚠️ Próximo passo: parar a VM de origem e liberar o IP..." \
         "⚠️ <b>O downtime começará em instantes.</b>"
       )
 
@@ -250,21 +259,15 @@ resource "null_resource" "notify_disk_done" {
 }
 
 # ==============================================================================
-# PASSO 2.5 — Para a VM E2 e desvincula o IP externo (via gcloud)
-# DEPENDÊNCIA EXPLÍCITA: executa SOMENTE após o Hyperdisk estar pronto.
-# Estratégia: snapshot e disco são criados com a E2 ainda no ar para
-# minimizar o downtime. Só então a E2 é parada e o IP é liberado para a N4.
-#
-# INÍCIO DO DOWNTIME: a E2 fica inacessível externamente a partir daqui.
-#
-# PRÉ-REQUISITO: gcloud instalado e autenticado com permissão Compute Instance Admin.
+# PASSO 2.5 — Para a VM de origem e desvincula o IP externo (via gcloud)
+# INÍCIO DO DOWNTIME: a VM de origem fica inacessível a partir daqui.
 # ==============================================================================
-resource "null_resource" "stop_and_detach_e2" {
-  # Executa sempre para garantir que a E2 está parada e IP liberado
+resource "null_resource" "stop_and_detach_source" {
   triggers = {
-    hyperdisk_id          = google_compute_disk.migration_hyperdisk.id
-    secondary_disks_ready = join(",", google_compute_disk.secondary_hyperdisk[*].id)
-    always_run            = timestamp()
+    # Depende do disco novo (se criado) ou apenas do snapshot (se reutilizado)
+    boot_disk_ready     = local.create_new_disk ? google_compute_disk.migration_boot_disk[0].id : google_compute_snapshot.migration_snapshot.id
+    secondary_disks_ready = join(",", google_compute_disk.secondary_disk[*].id)
+    always_run          = timestamp()
   }
 
   provisioner "local-exec" {
@@ -275,12 +278,11 @@ resource "null_resource" "stop_and_detach_e2" {
       CHAT_ID="${var.telegram_chat_id}"
       HORA=$(date '+%d/%m/%Y %H:%M:%S')
 
-      # Notifica o início do downtime antes de parar a E2
       MSG_DOWN=$(printf '%s\n' \
         "⚠️ <b>Passo 2.5 — DOWNTIME INICIADO</b>" \
         "━━━━━━━━━━━━━━━━━━━━━━━━" \
         "🔴 Parando VM  : <code>${var.source_instance_name}</code>" \
-        "🔌 Liberando IP: <code>${data.google_compute_instance.source_vm.network_interface[0].access_config[0].nat_ip}</code>" \
+        "🔌 IP externo  : <code>${try(data.google_compute_instance.source_vm.network_interface[0].access_config[0].nat_ip, "já liberado")}</code>" \
         "⏱  Horário     : <b>$HORA</b>"
       )
       curl -s -X POST "${local.telegram_api_url}" \
@@ -288,38 +290,34 @@ resource "null_resource" "stop_and_detach_e2" {
         -d "parse_mode=HTML" \
         --data-urlencode "text=$MSG_DOWN" > /dev/null 2>&1 || true
 
-      # O comando gcloud no Git Bash Windows pode requerer .cmd
-      GCLOUD_CMD="gcloud"
-      command -v gcloud.cmd >/dev/null 2>&1 && GCLOUD_CMD="gcloud.cmd"
-
-      # [1/2] Para a instância E2 — idempotente: gcloud não falha se já estiver parada
-      echo ">>> [1/2] Parando a instância E2: ${var.source_instance_name}"
-      STATUS_E2=$($GCLOUD_CMD compute instances describe "${var.source_instance_name}" \
+      # [1/2] Para a instância de origem — idempotente
+      echo ">>> [1/2] Parando a instância: ${var.source_instance_name}"
+      STATUS_SRC=$(gcloud compute instances describe "${var.source_instance_name}" \
         --zone="${var.zone}" --project="${var.project_id}" \
         --format="value(status)" || echo "NOT_FOUND")
-      if [ "$STATUS_E2" = "RUNNING" ] || [ "$STATUS_E2" = "STAGING" ]; then
-        $GCLOUD_CMD compute instances stop "${var.source_instance_name}" \
+      if [ "$STATUS_SRC" = "RUNNING" ] || [ "$STATUS_SRC" = "STAGING" ]; then
+        gcloud compute instances stop "${var.source_instance_name}" \
           --zone="${var.zone}" \
           --project="${var.project_id}" \
           --quiet
-        echo ">>> E2 parada com sucesso."
+        echo ">>> Instância parada com sucesso."
       else
-        echo ">>> E2 já estava parada (status: $STATUS_E2). Pulando stop."
+        echo ">>> Instância já estava parada (status: $STATUS_SRC). Pulando stop."
       fi
 
-      # [2/2] Desvincula o IP estático externo da E2 — verifica antes de tentar remover
+      # [2/2] Desvincula o IP estático externo
       echo ">>> [2/2] Verificando IP externo..."
-      EXISTING_CONFIG=$($GCLOUD_CMD compute instances describe "${var.source_instance_name}" \
+      EXISTING_CONFIG=$(gcloud compute instances describe "${var.source_instance_name}" \
         --zone="${var.zone}" --project="${var.project_id}" \
         --format="value(networkInterfaces[0].accessConfigs[0].name)" || echo "")
       if [ -n "$EXISTING_CONFIG" ]; then
         echo ">>> Access config encontrado: '$EXISTING_CONFIG'. Removendo..."
-        $GCLOUD_CMD compute instances delete-access-config "${var.source_instance_name}" \
+        gcloud compute instances delete-access-config "${var.source_instance_name}" \
           --access-config-name="$EXISTING_CONFIG" \
           --zone="${var.zone}" \
           --project="${var.project_id}" \
           --quiet
-        echo ">>> IP desvinculado com sucesso. Pronto para criar a instância N4."
+        echo ">>> IP desvinculado com sucesso."
       else
         echo ">>> IP externo já estava desvinculado ou não encontrado. Pulando."
       fi
@@ -328,60 +326,47 @@ resource "null_resource" "stop_and_detach_e2" {
 }
 
 # ==============================================================================
-# PASSO 3 — Nova instância N4 com Hyperdisk e IP estático reutilizado
-# DEPENDÊNCIA EXPLÍCITA via depends_on: a instância SÓ é criada após
-# stop_and_detach_e2 confirmar que a E2 foi parada e o IP está livre.
-# FIM DO DOWNTIME: quando a N4 subir com o mesmo IP, o serviço volta ao ar.
+# PASSO 3 — Nova instância com disco e IP estático reutilizado
+# FIM DO DOWNTIME: quando a instância subir com o mesmo IP, o serviço volta ao ar.
 # ==============================================================================
-resource "google_compute_instance" "migrated_n4_instance" {
+resource "google_compute_instance" "migrated_instance" {
   name         = local.new_instance_name
-  # Tipo resolvido automaticamente em locals.tf a partir de target_vcpus + target_memory_gb
   machine_type = local.resolved_machine_type
   project      = var.project_id
   zone         = var.zone
 
-  # Garante que E2 está parada e IP está liberado antes de criar a N4.
-  # Sem isso, o GCP retorna erro: IP_IN_USE_BY_ANOTHER_RESOURCE
-  depends_on = [null_resource.stop_and_detach_e2]
+  depends_on = [null_resource.stop_and_detach_source]
 
-  # Permite que o Terraform pare a VM para aplicar mudanças sem recriar o recurso
   allow_stopping_for_update = true
 
-  # Copia as network tags da VM E2 de origem para manter as mesmas regras de firewall
+  # Copia as network tags da VM de origem
   tags = data.google_compute_instance.source_vm.tags
 
-  # auto_delete = false: disco NÃO é excluído caso a instância seja destruída.
-  # Proteção dupla junto com o prevent_destroy no google_compute_disk.
+  # Disco de boot: usa o novo disco (se criado) ou reutiliza o disco de origem
   boot_disk {
-    source      = google_compute_disk.migration_hyperdisk.self_link
+    source      = local.create_new_disk ? google_compute_disk.migration_boot_disk[0].self_link : data.google_compute_disk.source_boot_disk.self_link
     auto_delete = false
   }
 
-  # Discos secundários — anexa todos os Hyperdisks criados a partir dos snapshots
-  # Preserva o modo (rw/ro) original da VM E2; auto_delete não se aplica a
-  # attached_disk com source (disco pré-existente) — o disco não é deletado com a VM.
+  # Discos secundários
   dynamic "attached_disk" {
     for_each = local.attached_disks
     content {
-      source = google_compute_disk.secondary_hyperdisk[attached_disk.key].self_link
+      source = google_compute_disk.secondary_disk[attached_disk.key].self_link
       mode   = local.secondary_disk_modes[attached_disk.key].mode
     }
   }
 
   network_interface {
-    # Se network/subnetwork estiverem vazias em terraform.tfvars, herda automaticamente
-    # da VM E2 de origem via data source — garante compatibilidade sem configuração manual.
-    # Para forçar uma rede diferente, preencha as variáveis em terraform.tfvars.
-    network    = coalesce(var.network,    data.google_compute_instance.source_vm.network_interface[0].network)
+    network    = coalesce(var.network, data.google_compute_instance.source_vm.network_interface[0].network)
     subnetwork = coalesce(var.subnetwork, data.google_compute_instance.source_vm.network_interface[0].subnetwork)
 
-    # Reutiliza o IP estático já liberado da VM E2 (obtido dinamicamente)
     access_config {
-      nat_ip = data.google_compute_instance.source_vm.network_interface[0].access_config[0].nat_ip
+      nat_ip = try(data.google_compute_instance.source_vm.network_interface[0].access_config[0].nat_ip, null)
     }
 
-    # OBRIGATÓRIO para família N4: VirtioNet não é suportado — sem GVNIC a VM não inicializa
-    nic_type = "GVNIC"
+    # GVNIC obrigatório para N4, C3, C3D, T2A, M3; VIRTIO_NET para demais
+    nic_type = local.requires_gvnic ? "GVNIC" : "VIRTIO_NET"
   }
 
   metadata = {
@@ -391,24 +376,21 @@ resource "google_compute_instance" "migrated_n4_instance" {
 
   labels = {
     origem     = var.source_instance_name
-    familia    = "n4"
+    familia    = var.target_machine_family
     gerenciado = "terraform"
   }
 
   lifecycle {
-    # Evita recriações desnecessárias por metadados injetados pelo GCP (IAP, startup-scripts, etc.)
     ignore_changes = [metadata]
   }
 }
 
 # ==============================================================================
 # NOTIFICAÇÃO 4 — Migração concluída
-# Verifica o status real da VM N4 via gcloud e envia resumo completo:
-# nome, status, IP externo e duração total calculada desde o início.
 # ==============================================================================
 resource "null_resource" "notify_migration_done" {
   triggers = {
-    instance_id = google_compute_instance.migrated_n4_instance.id
+    instance_id = google_compute_instance.migrated_instance.id
   }
 
   provisioner "local-exec" {
@@ -420,15 +402,13 @@ resource "null_resource" "notify_migration_done" {
       INSTANCE="${local.new_instance_name}"
       PROJECT="${var.project_id}"
       ZONE="${var.zone}"
-      IP="${data.google_compute_instance.source_vm.network_interface[0].access_config[0].nat_ip}"
+      IP="${try(google_compute_instance.migrated_instance.network_interface[0].access_config[0].nat_ip, "N/A")}"
       START_FILE="${local.start_time_file}"
 
-      # Verifica o status real da instância N4 via gcloud
       STATUS=$(gcloud compute instances describe "$INSTANCE" \
         --zone="$ZONE" --project="$PROJECT" \
         --format="value(status)" 2>/dev/null || echo "DESCONHECIDO")
 
-      # Calcula duração total a partir do timestamp salvo no início
       DURACAO="não disponível"
       if [ -f "$START_FILE" ]; then
         START_TS=$(cat "$START_FILE")
@@ -440,7 +420,6 @@ resource "null_resource" "notify_migration_done" {
         rm -f "$START_FILE"
       fi
 
-      # Define ícone e texto conforme o status retornado pelo GCP
       if [ "$STATUS" = "RUNNING" ]; then
         STATUS_ICON="✅"
         STATUS_TEXT="ONLINE — RUNNING"
@@ -449,16 +428,20 @@ resource "null_resource" "notify_migration_done" {
         STATUS_TEXT="$STATUS"
       fi
 
+      DISK_TEXT="${local.create_new_disk ? "Novo disco: " + local.resolved_disk_type : "Disco reutilizado: " + local.resolved_disk_type}"
+
       MSG=$(printf '%s\n' \
         "🎉 <b>MIGRAÇÃO CONCLUÍDA</b>" \
         "━━━━━━━━━━━━━━━━━━━━━━━━" \
-        "$STATUS_ICON VM N4     : <code>$INSTANCE</code>" \
-        "📊 Status   : <b>$STATUS_TEXT</b>" \
-        "🌐 IP Externo: <code>$IP</code>" \
-        "⚡ Tipo      : <code>${local.resolved_machine_type} + hyperdisk-balanced</code>" \
-        "⏱  Duração  : <b>$DURACAO</b>" \
-        "📋 Projeto   : <code>$PROJECT</code>" \
-        "🕐 Fim       : <b>$HORA</b>"
+        "$STATUS_ICON VM         : <code>$INSTANCE</code>" \
+        "📊 Status     : <b>$STATUS_TEXT</b>" \
+        "🌐 IP Externo : <code>$IP</code>" \
+        "⚡ Tipo        : <code>${local.resolved_machine_type}</code>" \
+        "💾 Disco       : <code>$DISK_TEXT</code>" \
+        "🔌 NIC         : <code>${local.nic_type_text}</code>" \
+        "⏱  Duração    : <b>$DURACAO</b>" \
+        "📋 Projeto     : <code>$PROJECT</code>" \
+        "🕐 Fim         : <b>$HORA</b>"
       )
 
       curl -s -X POST "${local.telegram_api_url}" \
