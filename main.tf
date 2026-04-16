@@ -36,7 +36,7 @@ resource "null_resource" "notify_migration_start" {
 
       echo $(date +%s) > "${local.start_time_file}"
 
-      DISK_ACTION="${local.create_new_disk ? "Criar novo disco (" + local.resolved_disk_type + ")" : "Reutilizar disco (" + local.resolved_disk_type + ")"}"
+      DISK_ACTION="${local.create_new_disk ? "Criar novo disco (${local.resolved_disk_type})" : "Reutilizar disco (${local.resolved_disk_type})"}"
 
       MSG=$(printf '%s\n' \
         "🚀 <b>MIGRAÇÃO INICIADA</b>" \
@@ -131,7 +131,7 @@ resource "null_resource" "notify_snapshot_done" {
       CHAT_ID="${var.telegram_chat_id}"
       HORA=$(date '+%d/%m/%Y %H:%M:%S')
 
-      DISK_MSG="${local.create_new_disk ? "▶ Criando disco " + local.resolved_disk_type + "..." : "▶ Disco sera reutilizado — nenhum disco novo necessario."}"
+      DISK_MSG="${local.create_new_disk ? "▶ Criando disco ${local.resolved_disk_type}..." : "▶ Disco sera reutilizado — nenhum disco novo necessario."}"
 
       MSG=$(printf '%s\n' \
         "✅ <b>Passo 1/3 — Snapshot criado</b>" \
@@ -428,7 +428,7 @@ resource "null_resource" "notify_migration_done" {
         STATUS_TEXT="$STATUS"
       fi
 
-      DISK_TEXT="${local.create_new_disk ? "Novo disco: " + local.resolved_disk_type : "Disco reutilizado: " + local.resolved_disk_type}"
+      DISK_TEXT="${local.create_new_disk ? "Novo disco: ${local.resolved_disk_type}" : "Disco reutilizado: ${local.resolved_disk_type}"}"
 
       MSG=$(printf '%s\n' \
         "🎉 <b>MIGRAÇÃO CONCLUÍDA</b>" \

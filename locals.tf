@@ -73,7 +73,7 @@ locals {
 
   # Tipo e tamanho do disco de boot de origem (lido via data source)
   source_boot_disk_type = data.google_compute_disk.source_boot_disk.type
-  source_boot_disk_size = data.google_compute_disk.source_boot_disk.size_gb
+  source_boot_disk_size = data.google_compute_disk.source_boot_disk.size
 
   # Lógica de reuso: mesmo tipo = reutiliza; diferente = cria novo a partir de snapshot
   disk_type_changed = local.source_boot_disk_type != local.resolved_disk_type
