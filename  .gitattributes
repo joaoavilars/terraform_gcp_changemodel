@@ -1,0 +1,18 @@
+# Padrão de normalização automática do Git
+* text=auto
+
+# Scripts Shell devem ter sempre quebras de linha Unix (LF)
+# Isso permite que rodem no WSL/Linux mesmo se clonados no Windows
+*.sh text eol=lf
+
+# Arquivos Terraform devem ter sempre quebras de linha Unix (LF)
+# Isso evita erros nos provisioners local-exec do Terraform
+*.tf text eol=lf
+*.tfvars text eol=lf
+*.tfvars.example text eol=lf
+
+# Scripts PowerShell devem ter sempre quebras de linha Windows (CRLF)
+*.ps1 text eol=crlf
+
+# Arquivos de documentação seguem o padrão do sistema
+*.md text

@@ -1,0 +1,75 @@
+# ==============================================================================
+# terraform.tfvars
+# Preencha os valores abaixo para o seu ambiente.
+#
+# SEGURANÇA: Este arquivo contém o token do Telegram.
+#   → Adicione ao .gitignore: echo "terraform.tfvars" >> .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Projeto GCP
+# ------------------------------------------------------------------------------
+project_id = "romena"     # ex: minha-empresa-prod
+region     = "us-east1"   # ex: southamerica-east1 (São Paulo)
+zone       = "us-east1-c" # ex: southamerica-east1-b
+
+# ------------------------------------------------------------------------------
+# VM de Origem (a ser migrada)
+# ------------------------------------------------------------------------------
+source_instance_name = "marsala" # ex: app-server-prod
+
+# ------------------------------------------------------------------------------
+# Rede
+# ------------------------------------------------------------------------------
+network    = "" # vazio = herda da VM de origem automaticamente
+subnetwork = "" # vazio = herda da VM de origem automaticamente
+
+# ------------------------------------------------------------------------------
+# Família e Dimensionamento da VM de Destino
+# ------------------------------------------------------------------------------
+# Famílias disponíveis: n4, n2, n2d, e2, c2, c3, c3d, m1, m3, t2a, t2d
+#
+# O script resolve automaticamente o tipo de máquina a partir de vcpus + memory_gb.
+# Se a combinação bater exatamente com um tipo predefinido, ele é usado.
+# Caso contrário, o tipo custom é gerado automaticamente.
+#
+# Exemplos de tipos predefinidos N4:
+#   2 vCPUs +   8 GB → n4-standard-2   |  2 vCPUs +  16 GB → n4-highmem-2
+#   4 vCPUs +  16 GB → n4-standard-4   |  4 vCPUs +  32 GB → n4-highmem-4
+#   8 vCPUs +  32 GB → n4-standard-8   |  8 vCPUs +  64 GB → n4-highmem-8
+#
+# Exemplos de tipos predefinidos N2:
+#   2 vCPUs +   8 GB → n2-standard-2   |  2 vCPUs +  16 GB → n2-highmem-2
+#   4 vCPUs +  16 GB → n2-standard-4   |  4 vCPUs +  32 GB → n2-highmem-4
+
+target_machine_family = "t2d" # Família de máquina de destino
+target_vcpus          = 2     # número de vCPUs desejados
+target_memory_gb      = 8     # memória RAM em GB — exemplo: 2 vCPU + 8 GB = n4-standard-2
+
+# Opcional: defina o tipo diretamente para ignorar a resolução automática acima.
+# machine_type_override = ""   # ex: "n4-standard-4", "n2-highmem-8", "c3-standard-22"
+
+# ------------------------------------------------------------------------------
+# Tipo de Disco de Destino
+# ------------------------------------------------------------------------------
+# Deixe vazio para usar o default da família:
+#   - N4, C3, C3D, M3 → hyperdisk-balanced
+#   - Demais famílias  → pd-balanced
+#
+# Se o tipo escolhido for IGUAL ao tipo atual do disco de boot,
+# o disco será REUTILIZADO (sem criar novo a partir de snapshot).
+# O snapshot ainda será criado para segurança.
+#
+# Tipos disponíveis: pd-standard, pd-balanced, pd-ssd, pd-extreme,
+#                    hyperdisk-balanced, hyperdisk-extreme, hyperdisk-throughput
+target_disk_type = "pd-balanced" # vazio = default da família | ex: "hyperdisk-balanced", "pd-ssd"
+
+# ------------------------------------------------------------------------------
+# Telegram — Alertas de Migração
+# ------------------------------------------------------------------------------
+# Como obter o token: fale com @BotFather no Telegram → /newbot
+telegram_bot_token = "2109875144:AAEdxLkKFBH-o27XgHndE00tPnkuTnbymQw" # ex: 7123456789:AAFxxxxxxxxxxxxxxxxxxxxxx
+
+# Como obter o chat_id: adicione @userinfobot a um grupo ou envie /start para ele
+telegram_chat_id = "87458649" # ex: -1001234567890 (grupo) ou 123456789 (privado)
+

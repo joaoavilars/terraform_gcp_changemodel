@@ -162,6 +162,29 @@ cd gcp_changemodel
 
 ---
 
+## Normalização de Quebras de Linha (Cross-platform)
+
+Se você alterna entre ambientes **Windows** e **Linux/WSL**, as quebras de linha dos scripts podem ficar corrompidas (ERRO: `\r: command not found`). Para corrigir isso, utilize os scripts de normalização incluídos:
+
+### No Windows (PowerShell)
+Se você acabou de clonar ou puxar mudanças e vai rodar os scripts no Windows:
+```powershell
+.\normalize_files_for_windows.ps1
+```
+
+### No Linux / WSL / Bash
+Se você vai executar os scripts ou o Terraform em ambiente Linux:
+```bash
+chmod +x normalize_files_for_linux.sh
+./normalize_files_for_linux.sh
+```
+
+> **Automação:** O repositório inclui um arquivo `.gitattributes` que tenta gerenciar isso automaticamente durante o `git commit/checkout`. No entanto, os scripts acima são úteis para correções manuais rápidas.
+
+---
+
+---
+
 ### 5. Preencher as variáveis iniciais do tfvars
 
 Copie o template e preencha apenas as três variáveis que o script de consulta precisa para funcionar:
