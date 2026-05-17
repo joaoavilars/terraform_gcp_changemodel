@@ -73,6 +73,7 @@ PROJECT_ID=$(get_tfvar "project_id")
 ZONE=$(get_tfvar "zone")
 REGION=$(get_tfvar "region")
 SOURCE_VM=$(get_tfvar "source_instance_name")
+FINAL_VM_NAME=$(get_tfvar "final_instance_name")
 
 # Variáveis de destino (opcionais — usadas para prévia da migração)
 TARGET_FAMILY=$(get_tfvar "target_machine_family")
@@ -324,7 +325,11 @@ if [[ -n "$TARGET_FAMILY" ]]; then
     *)                 NIC_DESTINO="VIRTIO_NET (GVNIC opcional)" ;;
   esac
 
-  TARGET_VM="${SOURCE_VM}-${TARGET_FAMILY}"
+  if [[ -n "$FINAL_VM_NAME" ]]; then
+    TARGET_VM="$FINAL_VM_NAME"
+  else
+    TARGET_VM="${SOURCE_VM}-${TARGET_FAMILY}"
+  fi
 
   divider
   row "VM destino:"      "$TARGET_VM"       "$GREEN"

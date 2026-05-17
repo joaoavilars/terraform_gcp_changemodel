@@ -118,12 +118,15 @@ TELEGRAM_TOKEN=$(get_tfvar "telegram_bot_token")
 TELEGRAM_CHAT=$(get_tfvar "telegram_chat_id")
 PROJECT_ID=$(get_tfvar "project_id")
 SOURCE_VM=$(get_tfvar "source_instance_name")
+FINAL_VM_NAME=$(get_tfvar "final_instance_name")
 REGION=$(get_tfvar "region")
 ZONE=$(get_tfvar "zone")
 TARGET_FAMILY=$(get_tfvar "target_machine_family")
 TARGET_DISK_TYPE_VAR=$(get_tfvar "target_disk_type")
 TARGET_VCPUS=$(get_tfvar "target_vcpus")
 TARGET_MEM_GB=$(get_tfvar "target_memory_gb")
+CHANGE_DISK_SIZE=$(get_tfvar "change_disk_size")
+TARGET_DISK_SIZE=$(get_tfvar "target_disk_size")
 
 if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "SEU-PROJECT-ID" ]]; then
   err "project_id não configurado em terraform.tfvars."
@@ -142,6 +145,105 @@ if [[ -z "$TELEGRAM_TOKEN" || "$TELEGRAM_TOKEN" == "SEU-BOT-TOKEN-AQUI" || "$TEL
 fi
 
 ok "Configuração carregada do terraform.tfvars."
+
+# ------------------------------------------------------------------------------
+# Detecção de downgrade de disco
+# Se change_disk_size = true e target_disk_size < tamanho atual do disco,
+# verifica se o filesystem já foi reduzido. Se não, oferece rodar
+# ./downgrade_boot_disk.sh automaticamente.
+# ------------------------------------------------------------------------------
+if [[ "$CHANGE_DISK_SIZE" == "true" && -n "$TARGET_DISK_SIZE" && "$TARGET_DISK_SIZE" -gt 0 ]] 2>/dev/null; then
+  # Obtém tamanho atual do disco de boot
+  CURRENT_DISK_SIZE=$(gcloud compute disks describe "$SOURCE_VM" \
+    --zone="$ZONE" --project="$PROJECT_ID" \
+    --format="value(sizeGb)" 2>/dev/null || echo "0")
+
+  if [[ "$TARGET_DISK_SIZE" -lt "$CURRENT_DISK_SIZE" ]]; then
+    log "Detectado downgrade de disco: ${CURRENT_DISK_SIZE} GB → ${TARGET_DISK_SIZE} GB"
+
+    # Verifica se o filesystem já foi reduzido (tenta ler via SSH)
+    FS_ALREADY_REDUCED=false
+    VM_STATUS=$(gcloud compute instances describe "$SOURCE_VM" \
+      --zone="$ZONE" --project="$PROJECT_ID" \
+      --format="value(status)" 2>/dev/null || echo "NOT_FOUND")
+
+    if [[ "$VM_STATUS" == "RUNNING" ]]; then
+      FS_SIZE=$(gcloud compute ssh "$SOURCE_VM" --zone="$ZONE" --project="$PROJECT_ID" \
+        --command="df -B1G --output=size / | tail -1 | tr -d ' ' || echo 0" \
+        --quiet 2>/dev/null || echo "0")
+      if [[ "$FS_SIZE" -le "$TARGET_DISK_SIZE" ]]; then
+        FS_ALREADY_REDUCED=true
+      fi
+    fi
+
+    if [[ "$FS_ALREADY_REDUCED" == "true" ]]; then
+      ok "Filesystem já reduzido (${FS_SIZE}G ≤ ${TARGET_DISK_SIZE}G). Prosseguindo com a migração."
+    else
+      warn "O filesystem do disco de boot AINDA NÃO foi reduzido para caber em ${TARGET_DISK_SIZE} GB."
+      warn "A migração criará um disco de ${TARGET_DISK_SIZE} GB a partir do snapshot atual."
+      warn "Se o filesystem ocupar mais que ${TARGET_DISK_SIZE} GB, a nova VM NÃO inicializará."
+      echo ""
+      echo -e "  ${BOLD}Deseja rodar o script de downgrade automático agora?${NC}"
+      echo -e "  Ele irá:"
+      echo -e "    • Criar snapshot de segurança"
+      echo -e "    • Parar a VM, criar VM temporária, reduzir FS+partição"
+      echo -e "    • Devolver o disco e apagar a VM temporária"
+      echo -e "    • Depois disso a migração prossegue normalmente"
+      echo ""
+      echo -e "  ${YELLOW}Requisitos:${NC} Linux + ext4 + partição única /dev/sda1"
+      echo -e "  ${YELLOW}Fora disso:${NC} responda 'nao' e siga o procedimento manual no README"
+      echo ""
+
+      if [[ "$AUTO_APPROVE" == "true" ]]; then
+        RUN_DOWNGRADE=true
+      else
+        read -r -p "Rodar downgrade automático agora? (sim/nao): " RESP
+        if [[ "$RESP" == "sim" ]]; then
+          RUN_DOWNGRADE=true
+        else
+          RUN_DOWNGRADE=false
+        fi
+      fi
+
+      if [[ "$RUN_DOWNGRADE" == "true" ]]; then
+        if [[ ! -f "./downgrade_boot_disk.sh" ]]; then
+          err "Script ./downgrade_boot_disk.sh não encontrado."
+          err "Baixe-o ou siga o procedimento manual no README."
+          exit 1
+        fi
+        log "Executando ./downgrade_boot_disk.sh..."
+        echo ""
+        if [[ "$DRY_RUN" == "true" ]]; then
+          warn "DRY-RUN: pulando execução do downgrade."
+        else
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            ./downgrade_boot_disk.sh --yes
+          else
+            ./downgrade_boot_disk.sh
+          fi
+          DOWNGRADE_EXIT=$?
+          if [[ "$DOWNGRADE_EXIT" -ne 0 ]]; then
+            err "downgrade_boot_disk.sh falhou (exit code: $DOWNGRADE_EXIT)."
+            err "Corrija o problema e execute novamente o migrate.sh."
+            exit 1
+          fi
+          ok "Downgrade concluído. Prosseguindo com a migração."
+        fi
+      else
+        warn "Downgrade não executado. A migração continuará, mas o disco pode não caber."
+        warn "Para abortar agora: Ctrl+C. Para prosseguir mesmo assim, aguarde."
+        if [[ "$AUTO_APPROVE" != "true" ]]; then
+          echo ""
+          read -r -p "Tem certeza que deseja prosseguir sem reduzir o filesystem? (sim/nao): " RESP2
+          [[ "$RESP2" != "sim" ]] && { err "Abortado pelo usuário."; exit 1; }
+        fi
+      fi
+    fi
+  elif [[ "$TARGET_DISK_SIZE" -gt "$CURRENT_DISK_SIZE" ]]; then
+    log "Detectado upgrade de disco: ${CURRENT_DISK_SIZE} GB → ${TARGET_DISK_SIZE} GB"
+    log "O upgrade é seguro e será feito automaticamente pelo Terraform."
+  fi
+fi
 
 # Confirma projeto GCP autenticado
 ACTIVE_ACCOUNT=$(gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | head -1 || echo "não autenticado")
@@ -288,7 +390,11 @@ else
 fi
 
 # Nomes dinâmicos
-TARGET_VM="${SOURCE_VM}-${TARGET_FAMILY}"
+if [[ -n "$FINAL_VM_NAME" ]]; then
+  TARGET_VM="$FINAL_VM_NAME"
+else
+  TARGET_VM="${SOURCE_VM}-${TARGET_FAMILY}"
+fi
 NEW_DISK_NAME="${SOURCE_VM}-${RESOLVED_DISK_TYPE}"
 SNAPSHOT_NAME="${SOURCE_VM}-migration-snapshot"
 

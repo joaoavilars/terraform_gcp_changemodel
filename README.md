@@ -238,6 +238,11 @@ Use as informações exibidas para decidir a família e o dimensionamento de des
 Com o relatório em mãos, preencha o restante do `terraform.tfvars`:
 
 ```hcl
+# ── Nome da VM de destino (opcional) ──────────────────────────────────────────
+# Deixe vazio para gerar automaticamente: "<source_instance_name>-<target_machine_family>"
+# Ex: source "marsala" + família "t2d" → "marsala-t2d"
+final_instance_name = ""   # ex: "marsala-novo" ou "" para nome automático
+
 # ── Rede (deixe vazio para herdar da VM de origem) ────────────────────────────
 network    = ""   # ex: "default" ou self_link completo
 subnetwork = ""   # ex: "default" ou self_link completo
@@ -362,6 +367,324 @@ Em caso de erro no `terraform apply`, uma notificação de falha é enviada auto
 | `e2`, `m1` | `pd-balanced` | Não suportado |
 
 > **T2A**: arquitetura ARM — o SO da VM de origem precisa ser compatível (ex: Ubuntu 22.04 ARM).
+
+---
+
+## Redimensionamento de disco (upgrade / downgrade)
+
+Por padrão a migração mantém o **mesmo tamanho** do disco de origem. Para alterar o tamanho do disco de boot (aumentar ou reduzir), use as variáveis em `terraform.tfvars`:
+
+```hcl
+change_disk_size = true   # ativa o redimensionamento
+target_disk_size = 100    # novo tamanho em GB (inteiro)
+```
+
+Quando `change_disk_size = true`, o disco **sempre será recriado a partir do snapshot** — mesmo que o tipo escolhido seja igual ao da origem.
+
+### Upgrade (aumentar disco)
+
+Seguro e simples. Após a migração, expanda a partição/filesystem dentro da nova VM:
+
+```bash
+# Linux (ext4) — exemplo para /dev/sda1
+sudo growpart /dev/sda 1
+sudo resize2fs /dev/sda1
+```
+
+### Downgrade do disco de BOOT — ⚠️ ATENÇÃO
+
+**Por que o downgrade é diferente do upgrade?** Aumentar um disco é seguro: o GCP só estende o espaço e o `resize2fs` expande o filesystem por cima. **Reduzir** exige reduzir o filesystem **antes** do snapshot, senão o disco novo terá dados truncados e a VM não bootará.
+
+E como o **disco de boot está montado como `/`** enquanto a VM roda, não há como reduzir o filesystem dentro da própria VM. A técnica correta é:
+
+1. Parar a VM
+2. Desanexar o disco de boot
+3. Anexar esse disco numa **VM temporária** como disco secundário
+4. Reduzir o filesystem e a partição na VM temporária (onde o disco está desmontado)
+5. Devolver o disco para a VM de origem como `--boot`
+6. Apagar a VM temporária
+7. Rodar a migração normal (`./migrate.sh`), que cria o disco novo já com o tamanho menor a partir do snapshot
+
+> **Regra de ouro:** `tamanho_do_filesystem_reduzido ≤ target_disk_size`
+
+Este repositório fornece um **script que automatiza todos esses passos** — incluindo a VM temporária, o resize remoto e a limpeza.
+
+##### Integração com `migrate.sh` / `migrate.ps1`
+
+O `migrate.sh` (e `.ps1`) detecta **automaticamente** quando um downgrade é necessário:
+
+1. Lê `change_disk_size = true` e `target_disk_size` do `terraform.tfvars`
+2. Compara com o tamanho real do disco de boot no GCP
+3. Se `target_disk_size < tamanho_atual`, verifica via SSH se o filesystem já foi reduzido
+4. Se **não foi reduzido**: pergunta se você quer rodar o downgrade automático agora. Se responder `sim`, ele chama `./downgrade_boot_disk.sh` automaticamente antes de prosseguir
+5. Se **já foi reduzido**: segue direto para a migração
+
+Ou seja, você só precisa de **um comando**:
+
+```bash
+# Edite terraform.tfvars: change_disk_size = true, target_disk_size = 100
+# Depois execute apenas:
+./migrate.sh
+```
+
+O script pergunta se deve reduzir o disco → você confirma → ele reduz → depois migra. Tudo em sequência.
+
+---
+
+#### Método 1: AUTOMATIZADO (recomendado) — `downgrade_boot_disk.sh` / `.ps1`
+
+**Escopo suportado pela automação:**
+
+| Item | Suporte |
+|------|---------|
+| SO da VM | Linux (Debian/Ubuntu/CentOS/etc.) |
+| Filesystem | **ext4 apenas** |
+| Partição raiz | **Partição única em `/dev/sda1`** |
+| LVM / criptografia LUKS | ❌ não suportado |
+| xfs / btrfs / zfs | ❌ não suportado (xfs **não pode** reduzir; use método manual) |
+| Disco de boot | ✅ |
+| Disco de dados secundário | ❌ (downgrade de discos secundários ainda é manual) |
+
+Se sua VM cai fora do escopo, o script aborta com mensagem clara e você deve usar o **Método 2 (manual)** abaixo.
+
+##### Pré-requisito: configurar `terraform.tfvars`
+
+```hcl
+change_disk_size = true     # OBRIGATÓRIO — sem isso o migrate.sh manteria o tamanho original
+target_disk_size = 100      # novo tamanho em GB
+```
+
+##### Execução
+
+**Linux / WSL:**
+```bash
+chmod +x downgrade_boot_disk.sh
+./downgrade_boot_disk.sh --dry-run    # confere o plano sem alterar nada
+./downgrade_boot_disk.sh              # executa interativamente (confirmação 'sim')
+```
+
+**Windows (PowerShell):**
+```powershell
+.\downgrade_boot_disk.ps1 -DryRun
+.\downgrade_boot_disk.ps1
+```
+
+Flags adicionais: `-y` / `--yes` (Linux) ou `-AutoApprove` (Windows) para pular confirmação.
+
+##### O que o script faz, passo a passo
+
+Usando o cenário deste repo (`marsala` em Linux/ext4, disco `pd-balanced` de 500 GB → 100 GB):
+
+| # | Ação | Comando equivalente |
+|---|------|---------------------|
+| 1 | Lê `terraform.tfvars`, valida `change_disk_size=true` e `target_disk_size > 0` | — |
+| 2 | Conecta SSH na `marsala`, verifica que é ext4 + sda1, e que **espaço usado < (target − 10) GB** | `df -B1G /` + `blkid` |
+| 3 | Cria snapshot de segurança `marsala-pre-downgrade-YYYYMMDD-HHMMSS` (rollback total) | `gcloud compute disks snapshot` |
+| 4 | Para a VM `marsala` | `gcloud compute instances stop marsala` |
+| 5 | Cria VM temporária `marsala-resize-temp` (e2-small, Debian 12, 10 GB) | `gcloud compute instances create` |
+| 6 | Desanexa o disco de boot da `marsala` e anexa na temporária com `device-name=resize-target` | `detach-disk` + `attach-disk` |
+| 7 | Via SSH na temporária: detecta disco em `/dev/disk/by-id/google-resize-target`, valida ext4+1 partição, roda `e2fsck -fy` | `gcloud compute ssh` |
+| 8 | Reduz filesystem para **`(target − 10)` GB** (ex: 90 GB) com `resize2fs` | `resize2fs /dev/sdX1 90G` |
+| 9 | Reduz partição para **`(target − 5)` GB** (ex: 95 GB) com `parted resizepart` | `parted ... resizepart 1 95GB Yes` |
+| 10 | `e2fsck -fy` final para confirmar consistência | — |
+| 11 | Desanexa o disco da temporária | `detach-disk` |
+| 12 | Reanexa o disco na `marsala` como `--boot` | `attach-disk --boot` |
+| 13 | Apaga a VM temporária | `instances delete` |
+| 14 | Imprime instruções para rodar `./migrate.sh` em seguida | — |
+
+> **Por que 90/95 GB e não 100 GB?** Margens de segurança:
+> - **Filesystem em `(target − 10)` GB** garante que ele caiba folgadamente no disco final de 100 GB e ainda deixa espaço para o `resize2fs` final expandir
+> - **Partição em `(target − 5)` GB** fica entre o FS (90 GB) e o disco (100 GB), evitando que blocos finais da tabela de partições caiam fora do novo disco
+
+##### Notificações Telegram
+
+Se `telegram_bot_token` e `telegram_chat_id` estiverem preenchidos em `terraform.tfvars`, o script envia **10 mensagens** durante a execução: início, conclusão de cada um dos 8 passos, e conclusão final com duração total. Em caso de falha em qualquer ponto, uma mensagem de erro é enviada automaticamente com instruções para rollback via snapshot.
+
+Se as variáveis não estiverem preenchidas, o script roda silenciosamente sem Telegram (sem falhar).
+
+##### Após o script terminar
+
+```bash
+# (Opcional) Validar que a marsala sobe normalmente antes da migração
+gcloud compute instances start marsala --zone=us-east1-c --project=romena
+gcloud compute ssh marsala --zone=us-east1-c --project=romena
+df -h /        # deve mostrar /dev/sda1 com ~90 GB
+gcloud compute instances stop marsala --zone=us-east1-c --project=romena
+
+# Rodar a migração
+./migrate.sh
+```
+
+A migração criará a nova VM (`marsala-t2d`) com disco de **100 GB** contendo o filesystem de 90 GB.
+
+##### Pós-migração: expandir o filesystem para usar todo o disco
+
+```bash
+gcloud compute ssh marsala-t2d --zone=us-east1-c --project=romena
+sudo growpart /dev/sda 1
+sudo resize2fs /dev/sda1
+df -h /        # agora ~100 GB
+```
+
+##### Limpeza final
+
+1. Apague a VM antiga `marsala` no Console GCP
+2. Apague o disco original `marsala` de 500 GB
+3. Apague o snapshot `marsala-pre-downgrade-YYYYMMDD-HHMMSS` (somente após semanas de operação estável)
+
+##### O que fazer se o script falhar no meio
+
+O snapshot de segurança criado no passo 3 permite recuperação completa. O próprio script imprime os 3 comandos `gcloud` para devolver o disco à `marsala` e apagar a VM temporária. Em último caso:
+
+```bash
+# Recria o disco a partir do snapshot
+gcloud compute disks create marsala-restored \
+  --source-snapshot=marsala-pre-downgrade-YYYYMMDD-HHMMSS \
+  --zone=us-east1-c --project=romena
+```
+
+---
+
+#### Método 2: MANUAL (para cenários fora do escopo: xfs, LVM, multi-partição, etc.)
+
+Use exatamente o mesmo fluxo do script, mas executando cada comando à mão. A diferença é que **você** identifica o filesystem, ajusta partições, lida com LVM/cripto, etc.
+
+<details>
+<summary><b>Passos manuais (clique para expandir)</b></summary>
+
+##### 1. Verificar uso real e validar margem
+
+```bash
+gcloud compute ssh marsala --zone=us-east1-c --project=romena
+df -h /
+lsblk -f
+```
+
+Espaço usado deve estar **bem abaixo** do `target_disk_size`. Limpe `/var/log`, caches, snapshots APT, etc. se necessário.
+
+##### 2. Snapshot manual de segurança
+
+```bash
+gcloud compute disks snapshot marsala \
+  --zone=us-east1-c --project=romena \
+  --snapshot-names=marsala-pre-downgrade-$(date +%Y%m%d) \
+  --storage-location=us-east1
+```
+
+##### 3. Parar a VM
+
+```bash
+gcloud compute instances stop marsala --zone=us-east1-c --project=romena
+```
+
+##### 4. Criar VM temporária
+
+```bash
+gcloud compute instances create vm-resize-temp \
+  --zone=us-east1-c --project=romena \
+  --machine-type=e2-small \
+  --image-family=debian-12 --image-project=debian-cloud \
+  --boot-disk-size=10GB
+```
+
+##### 5. Mover o disco para a temporária
+
+```bash
+gcloud compute instances detach-disk marsala \
+  --disk=marsala --zone=us-east1-c --project=romena
+
+gcloud compute instances attach-disk vm-resize-temp \
+  --disk=marsala --device-name=resize-target \
+  --zone=us-east1-c --project=romena
+```
+
+##### 6. Reduzir filesystem e partição (na temporária)
+
+```bash
+gcloud compute ssh vm-resize-temp --zone=us-east1-c --project=romena
+```
+
+Dentro da VM temporária — **identifique o disco/partição conforme seu cenário**:
+
+```bash
+# Disco anexado via device-name aparece como /dev/disk/by-id/google-resize-target
+DISK=$(readlink -f /dev/disk/by-id/google-resize-target)   # ex: /dev/sdb
+PART="${DISK}1"
+
+sudo umount "$PART" 2>/dev/null || true
+
+# Para ext4:
+sudo e2fsck -fy "$PART"
+sudo resize2fs "$PART" 90G
+
+# Para xfs: NÃO É POSSÍVEL REDUZIR. Backup + recriar.
+# Para LVM: lvreduce -L 90G /dev/vgX/lvY  (após reduzir o FS interno)
+
+# Reduzir a partição (parted)
+sudo parted "$DISK" ---pretend-input-tty <<EOF
+resizepart 1
+95GB
+Yes
+EOF
+
+sudo parted "$DISK" print
+sudo e2fsck -fy "$PART"
+```
+
+##### 7. Devolver o disco e apagar a temporária
+
+```bash
+gcloud compute instances detach-disk vm-resize-temp \
+  --disk=marsala --zone=us-east1-c --project=romena
+
+gcloud compute instances attach-disk marsala \
+  --disk=marsala --boot \
+  --zone=us-east1-c --project=romena
+
+gcloud compute instances delete vm-resize-temp \
+  --zone=us-east1-c --project=romena --quiet
+```
+
+##### 8. (Opcional) Validar boot da `marsala`
+
+```bash
+gcloud compute instances start marsala --zone=us-east1-c --project=romena
+gcloud compute ssh marsala --zone=us-east1-c --project=romena
+df -h /
+systemctl --failed
+gcloud compute instances stop marsala --zone=us-east1-c --project=romena
+```
+
+##### 9. Configurar `terraform.tfvars` e migrar
+
+```hcl
+change_disk_size = true
+target_disk_size = 100
+```
+
+```bash
+./migrate.sh
+```
+
+##### 10. Expandir o FS na nova VM
+
+```bash
+gcloud compute ssh marsala-t2d --zone=us-east1-c --project=romena
+sudo growpart /dev/sda 1
+sudo resize2fs /dev/sda1
+```
+
+</details>
+
+---
+
+### Limites mínimos por tipo de disco
+
+| Tipo | Tamanho mínimo |
+|------|----------------|
+| `pd-standard`, `pd-balanced`, `pd-ssd`, `hyperdisk-balanced` | 10 GB |
+| `pd-extreme`, `hyperdisk-extreme` | 64 GB |
+| `hyperdisk-throughput` | 2 TB |
 
 ---
 

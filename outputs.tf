@@ -48,9 +48,19 @@ output "tipo_disco_destino" {
   value       = local.resolved_disk_type
 }
 
+output "tamanho_disco_destino_gb" {
+  description = "Tamanho final do disco de boot da instância de destino, em GB"
+  value       = local.resolved_disk_size
+}
+
 output "disco_reutilizado" {
   description = "Indica se o disco de boot existente foi reutilizado (true) ou se um novo foi criado a partir de snapshot (false)"
   value       = !local.create_new_disk
+}
+
+output "disco_downgrade" {
+  description = "Indica se a operação reduziu o tamanho do disco de boot em relação à origem"
+  value       = local.disk_is_downgrade
 }
 
 output "discos_secundarios_migrados" {

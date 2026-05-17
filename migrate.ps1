@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # migrate.ps1 — Executor da migração GCP (qualquer família)
 # Compatível com: Windows PowerShell 5.1+ e PowerShell Core 7+
 #
@@ -175,11 +175,14 @@ $ProjectId      = Get-TfVar "project_id"
 $Region         = Get-TfVar "region"
 $Zone           = Get-TfVar "zone"
 $SourceVm       = Get-TfVar "source_instance_name"
+$FinalVmName    = Get-TfVar "final_instance_name"
 $TargetFamily   = Get-TfVar "target_machine_family"
 $TargetDiskVar  = Get-TfVar "target_disk_type"
 $TargetVcpus    = Get-TfVar "target_vcpus"
 $TargetMemGb    = Get-TfVar "target_memory_gb"
 $MtOverride     = Get-TfVar "machine_type_override"
+$ChangeDiskSize = Get-TfVar "change_disk_size"
+$TargetDiskSize = Get-TfVar "target_disk_size"
 
 if ([string]::IsNullOrEmpty($ProjectId) -or $ProjectId -eq "SEU-PROJECT-ID") {
     Write-Err "project_id não configurado em terraform.tfvars."
@@ -199,6 +202,98 @@ Write-Ok "Configuração carregada do terraform.tfvars."
 $activeAccount = (gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null |
     Select-Object -First 1)
 Write-Info "Conta GCP ativa: $activeAccount"
+
+# ------------------------------------------------------------------------------
+# Detecção de downgrade de disco
+# Se change_disk_size = true e target_disk_size < tamanho atual do disco,
+# verifica se o filesystem já foi reduzido. Se não, oferece rodar
+# .\downgrade_boot_disk.ps1 automaticamente.
+# ------------------------------------------------------------------------------
+$TargetDiskSizeInt = 0
+if ($ChangeDiskSize -eq "true" -and [int]::TryParse($TargetDiskSize, [ref]$TargetDiskSizeInt) -and $TargetDiskSizeInt -gt 0) {
+    $currentDiskSize = [int](gcloud compute disks describe $SourceVm `
+        --zone=$Zone --project=$ProjectId `
+        --format="value(sizeGb)" 2>$null)
+
+    if ($TargetDiskSizeInt -lt $currentDiskSize) {
+        Write-Info "Detectado downgrade de disco: ${currentDiskSize} GB → ${TargetDiskSizeInt} GB"
+
+        # Verifica se o filesystem já foi reduzido (tenta ler via SSH)
+        $fsAlreadyReduced = $false
+        $vmStatus = gcloud compute instances describe $SourceVm `
+            --zone=$Zone --project=$ProjectId --format="value(status)" 2>$null
+
+        if ($vmStatus -eq "RUNNING") {
+            $fsSize = gcloud compute ssh $SourceVm --zone=$Zone --project=$ProjectId `
+                --command='df -B1G --output=size / | tail -1 | tr -d " " || echo 0' `
+                --quiet 2>$null
+            $fsSizeInt = 0
+            if ([int]::TryParse($fsSize, [ref]$fsSizeInt) -and $fsSizeInt -le $TargetDiskSizeInt) {
+                $fsAlreadyReduced = $true
+            }
+        }
+
+        if ($fsAlreadyReduced) {
+            Write-Ok "Filesystem já reduzido (${fsSizeInt}G ≤ ${TargetDiskSizeInt}G). Prosseguindo com a migração."
+        } else {
+            Write-Warn "O filesystem do disco de boot AINDA NÃO foi reduzido para caber em ${TargetDiskSizeInt} GB."
+            Write-Warn "A migração criará um disco de ${TargetDiskSizeInt} GB a partir do snapshot atual."
+            Write-Warn "Se o filesystem ocupar mais que ${TargetDiskSizeInt} GB, a nova VM NÃO inicializará."
+            Write-Host ""
+            Write-Host "  Deseja rodar o script de downgrade automático agora?" -ForegroundColor White
+            Write-Host "  Ele irá:" -ForegroundColor White
+            Write-Host "    • Criar snapshot de segurança" -ForegroundColor White
+            Write-Host "    • Parar a VM, criar VM temporária, reduzir FS+partição" -ForegroundColor White
+            Write-Host "    • Devolver o disco e apagar a VM temporária" -ForegroundColor White
+            Write-Host "    • Depois disso a migração prossegue normalmente" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  Requisitos: Linux + ext4 + partição única /dev/sda1" -ForegroundColor Yellow
+            Write-Host "  Fora disso: responda 'nao' e siga o procedimento manual no README" -ForegroundColor Yellow
+            Write-Host ""
+
+            if ($AutoApprove) {
+                $runDowngrade = $true
+            } else {
+                $resp = Read-Host "Rodar downgrade automático agora? (sim/nao)"
+                $runDowngrade = ($resp -eq "sim")
+            }
+
+            if ($runDowngrade) {
+                if (-not (Test-Path ".\downgrade_boot_disk.ps1")) {
+                    Write-Err "Script .\downgrade_boot_disk.ps1 não encontrado."
+                    exit 1
+                }
+                Write-Info "Executando .\downgrade_boot_disk.ps1..."
+                Write-Host ""
+                if ($DryRun) {
+                    Write-Warn "DRY-RUN: pulando execução do downgrade."
+                } else {
+                    if ($AutoApprove) {
+                        & .\downgrade_boot_disk.ps1 -AutoApprove
+                    } else {
+                        & .\downgrade_boot_disk.ps1
+                    }
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Err "downgrade_boot_disk.ps1 falhou (exit code: $LASTEXITCODE)."
+                        Write-Err "Corrija o problema e execute novamente o migrate.ps1."
+                        exit 1
+                    }
+                    Write-Ok "Downgrade concluído. Prosseguindo com a migração."
+                }
+            } else {
+                Write-Warn "Downgrade não executado. A migração continuará, mas o disco pode não caber."
+                if (-not $AutoApprove) {
+                    Write-Host ""
+                    $resp2 = Read-Host "Tem certeza que deseja prosseguir sem reduzir o filesystem? (sim/nao)"
+                    if ($resp2 -ne "sim") { Write-Err "Abortado pelo usuário."; exit 1 }
+                }
+            }
+        }
+    } elseif ($TargetDiskSizeInt -gt $currentDiskSize) {
+        Write-Info "Detectado upgrade de disco: ${currentDiskSize} GB → ${TargetDiskSizeInt} GB"
+        Write-Info "O upgrade é seguro e será feito automaticamente pelo Terraform."
+    }
+}
 
 # ==============================================================================
 # ETAPA 1.5 — Consulta specs da VM de origem via API GCP
@@ -261,7 +356,11 @@ else                   { $TargetNic = "VIRTIO_NET" }
 if ($CreateNewDisk) { $DiskAction = "CRIAR NOVO a partir de snapshot" }
 else               { $DiskAction = "REUTILIZADO (snapshot criado para seguranca)" }
 
-$TargetVm     = "$SourceVm-$TargetFamily"
+if (-not [string]::IsNullOrEmpty($FinalVmName)) {
+    $TargetVm = $FinalVmName
+} else {
+    $TargetVm = "$SourceVm-$TargetFamily"
+}
 $NewDiskName  = "$SourceVm-$ResolvedDiskType"
 $SnapshotName = "$SourceVm-migration-snapshot"
 

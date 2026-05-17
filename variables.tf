@@ -34,6 +34,12 @@ variable "source_instance_name" {
   type        = string
 }
 
+variable "final_instance_name" {
+  description = "Nome da VM de destino. Deixe vazio (\"\") para gerar automaticamente como \"<source_instance_name>-<target_machine_family>\"."
+  type        = string
+  default     = ""
+}
+
 
 variable "network" {
   description = "Nome ou self_link da VPC da nova instância. Deixe vazio (\"\") para herdar automaticamente da VM de origem."
@@ -85,6 +91,23 @@ variable "target_disk_type" {
   description = "Tipo de disco para a VM de destino (ex: pd-balanced, pd-ssd, hyperdisk-balanced). Deixe vazio para usar o default da família (hyperdisk-balanced para n4/c3/c3d, pd-balanced para demais)."
   type        = string
   default     = ""
+}
+
+variable "change_disk_size" {
+  description = "Quando true, força recriação do disco de boot a partir do snapshot usando o tamanho definido em target_disk_size. Use para upgrade/downgrade de tamanho. ATENÇÃO: downgrade exige reduzir o filesystem na VM de origem ANTES de executar a migração."
+  type        = bool
+  default     = false
+}
+
+variable "target_disk_size" {
+  description = "Tamanho do disco de boot da VM de destino em GB (inteiro). Só é aplicado quando change_disk_size = true. Para downgrade, certifique-se de que o filesystem na origem foi reduzido para um valor <= target_disk_size."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.target_disk_size >= 0
+    error_message = "target_disk_size deve ser um inteiro >= 0 (em GB)."
+  }
 }
 
 # ------------------------------------------------------------------------------

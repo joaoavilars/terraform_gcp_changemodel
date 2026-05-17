@@ -18,6 +18,10 @@ zone       = "us-east1-c"   # ex: southamerica-east1-b
 # ------------------------------------------------------------------------------
 source_instance_name = "minha-vm" # ex: app-server-prod
 
+# Nome da VM de destino. Se vazio, será gerado automaticamente como:
+#   "<source_instance_name>-<target_machine_family>"  (ex: minha-vm-n4)
+final_instance_name = "" # ex: "app-server-prod-novo" | vazio = nome automático
+
 # ------------------------------------------------------------------------------
 # Rede
 # ------------------------------------------------------------------------------
@@ -63,6 +67,31 @@ target_memory_gb = 8  # memória RAM em GB — exemplo: 2 vCPU + 8 GB = n4-stand
 # Tipos disponíveis: pd-standard, pd-balanced, pd-ssd, pd-extreme,
 #                    hyperdisk-balanced, hyperdisk-extreme, hyperdisk-throughput
 target_disk_type = "" # vazio = default da família | ex: "hyperdisk-balanced", "pd-ssd"
+
+# ------------------------------------------------------------------------------
+# Tamanho do Disco de Destino (upgrade/downgrade)
+# ------------------------------------------------------------------------------
+# Por padrão, o disco mantém o mesmo tamanho da VM de origem.
+#
+# Para ALTERAR o tamanho (upgrade OU downgrade), defina:
+#   change_disk_size = true
+#   target_disk_size = <tamanho em GB inteiro>
+#
+# Quando change_disk_size = true, o disco SEMPRE é recriado a partir do snapshot
+# (mesmo que o tipo seja o mesmo da origem).
+#
+# ⚠️ DOWNGRADE (target_disk_size MENOR que o tamanho atual):
+#   Você PRECISA reduzir o filesystem na VM de ORIGEM antes de rodar a migração,
+#   senão o disco novo terá dados truncados / sistema corrompido.
+#   Procedimento típico Linux (ext4): resize2fs -M /dev/sdaX (reduz ao mínimo)
+#                                     ou resize2fs /dev/sdaX <novo_tamanho>
+#   Procedimento Windows: diskmgmt.msc → Shrink Volume.
+#
+# ⚠️ Limites mínimos por tipo de disco:
+#   pd-* e hyperdisk-balanced : mínimo 10 GB
+#   hyperdisk-extreme         : mínimo 64 GB
+change_disk_size = false # true para aplicar target_disk_size (upgrade ou downgrade)
+target_disk_size = 0     # tamanho em GB, inteiro (ignorado se change_disk_size = false)
 
 # ------------------------------------------------------------------------------
 # Telegram — Alertas de Migração

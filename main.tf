@@ -36,7 +36,7 @@ resource "null_resource" "notify_migration_start" {
 
       echo $(date +%s) > "${local.start_time_file}"
 
-      DISK_ACTION="${local.create_new_disk ? "Criar novo disco (${local.resolved_disk_type})" : "Reutilizar disco (${local.resolved_disk_type})"}"
+      DISK_ACTION="${local.create_new_disk ? "Criar novo disco (${local.resolved_disk_type} ${local.resolved_disk_size}GB)${local.disk_is_downgrade ? " ⚠️ DOWNGRADE" : ""}" : "Reutilizar disco (${local.resolved_disk_type} ${local.source_boot_disk_size}GB)"}"
 
       MSG=$(printf '%s\n' \
         "🚀 <b>MIGRAÇÃO INICIADA</b>" \
@@ -131,7 +131,7 @@ resource "null_resource" "notify_snapshot_done" {
       CHAT_ID="${var.telegram_chat_id}"
       HORA=$(date '+%d/%m/%Y %H:%M:%S')
 
-      DISK_MSG="${local.create_new_disk ? "▶ Criando disco ${local.resolved_disk_type}..." : "▶ Disco sera reutilizado — nenhum disco novo necessario."}"
+      DISK_MSG="${local.create_new_disk ? "▶ Criando disco ${local.resolved_disk_type} ${local.resolved_disk_size}GB..." : "▶ Disco sera reutilizado — nenhum disco novo necessario."}"
 
       MSG=$(printf '%s\n' \
         "✅ <b>Passo 1/3 — Snapshot criado</b>" \
@@ -164,6 +164,10 @@ resource "google_compute_disk" "migration_boot_disk" {
   zone    = var.zone
 
   type = local.resolved_disk_type
+
+  # Tamanho do disco — só é definido quando o usuário solicitou mudança (change_disk_size=true).
+  # Quando não solicitado, o GCP herda o tamanho do snapshot automaticamente.
+  size = var.change_disk_size ? var.target_disk_size : null
 
   # Dependência implícita: o disco SÓ é provisionado após o snapshot estar disponível
   snapshot = google_compute_snapshot.migration_snapshot.self_link
@@ -241,10 +245,11 @@ resource "null_resource" "notify_disk_done" {
       MSG=$(printf '%s\n' \
         "✅ <b>Passo 2/3 — Disco criado</b>" \
         "━━━━━━━━━━━━━━━━━━━━━━━━" \
-        "💾 Nome: <code>${local.new_disk_name}</code>" \
-        "🔷 Tipo: <code>${local.resolved_disk_type}</code>" \
-        "📍 Zona: <code>${var.zone}</code>" \
-        "⏱  Hora: <b>$HORA</b>" \
+        "💾 Nome    : <code>${local.new_disk_name}</code>" \
+        "🔷 Tipo    : <code>${local.resolved_disk_type}</code>" \
+        "📏 Tamanho : <code>${local.resolved_disk_size}GB</code>${local.disk_is_downgrade ? " ⚠️ DOWNGRADE" : ""}" \
+        "📍 Zona    : <code>${var.zone}</code>" \
+        "⏱  Hora    : <b>$HORA</b>" \
         "" \
         "⚠️ Próximo passo: parar a VM de origem e liberar o IP..." \
         "⚠️ <b>O downtime começará em instantes.</b>"
@@ -428,7 +433,7 @@ resource "null_resource" "notify_migration_done" {
         STATUS_TEXT="$STATUS"
       fi
 
-      DISK_TEXT="${local.create_new_disk ? "Novo disco: ${local.resolved_disk_type}" : "Disco reutilizado: ${local.resolved_disk_type}"}"
+      DISK_TEXT="${local.create_new_disk ? "Novo disco: ${local.resolved_disk_type} ${local.resolved_disk_size}GB${local.disk_is_downgrade ? " (DOWNGRADE)" : ""}" : "Disco reutilizado: ${local.resolved_disk_type} ${local.source_boot_disk_size}GB"}"
 
       MSG=$(printf '%s\n' \
         "🎉 <b>MIGRAÇÃO CONCLUÍDA</b>" \

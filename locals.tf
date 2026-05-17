@@ -9,7 +9,7 @@ locals {
   # Nomes dos novos recursos — gerados a partir da VM de origem + família
   # Garante rastreabilidade e consistência entre os recursos criados.
   # ============================================================================
-  new_instance_name = "${var.source_instance_name}-${var.target_machine_family}"
+  new_instance_name = var.final_instance_name != "" ? var.final_instance_name : "${var.source_instance_name}-${var.target_machine_family}"
   new_disk_name     = "${var.source_instance_name}-${local.resolved_disk_type}"
   snapshot_name     = "${var.source_instance_name}-migration-snapshot"
 
@@ -75,12 +75,28 @@ locals {
   source_boot_disk_type = data.google_compute_disk.source_boot_disk.type
   source_boot_disk_size = data.google_compute_disk.source_boot_disk.size
 
-  # Lógica de reuso: mesmo tipo = reutiliza; diferente = cria novo a partir de snapshot
+  # ----------------------------------------------------------------------------
+  # Tamanho do disco de destino — resolução
+  # Se change_disk_size = true, usa target_disk_size (em GB).
+  # Caso contrário, mantém o tamanho do disco de origem.
+  # ----------------------------------------------------------------------------
+  resolved_disk_size = var.change_disk_size ? var.target_disk_size : local.source_boot_disk_size
+
+  # Indica se houve alteração efetiva de tamanho (somente quando o usuário pediu)
+  disk_size_changed = var.change_disk_size && var.target_disk_size != local.source_boot_disk_size
+
+  # Indica se a operação é um downgrade (alvo menor que origem)
+  disk_is_downgrade = var.change_disk_size && var.target_disk_size > 0 && var.target_disk_size < local.source_boot_disk_size
+
+  # Lógica de reuso:
+  #   - mudou o tipo OU
+  #   - usuário pediu mudança de tamanho (change_disk_size = true)
+  # qualquer um desses => cria disco novo a partir de snapshot
   disk_type_changed = local.source_boot_disk_type != local.resolved_disk_type
-  create_new_disk   = local.disk_type_changed
+  create_new_disk   = local.disk_type_changed || local.disk_size_changed
 
   # Texto descritivo da ação do disco — usado nas notificações
-  disk_action_text = local.create_new_disk ? "Criado novo disco ${local.resolved_disk_type} a partir de snapshot" : "Disco reutilizado (${local.resolved_disk_type}) — snapshot criado para seguranca"
+  disk_action_text = local.create_new_disk ? "Criado novo disco ${local.resolved_disk_type} ${local.resolved_disk_size}GB a partir de snapshot${local.disk_is_downgrade ? " (DOWNGRADE)" : ""}" : "Disco reutilizado (${local.resolved_disk_type} ${local.source_boot_disk_size}GB) — snapshot criado para seguranca"
 
   # ============================================================================
   # Resolução automática do tipo de máquina — multi-família

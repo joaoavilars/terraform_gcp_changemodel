@@ -73,6 +73,7 @@ $ProjectId    = Get-TfVar "project_id"
 $Zone         = Get-TfVar "zone"
 $Region       = Get-TfVar "region"
 $SourceVm     = Get-TfVar "source_instance_name"
+$FinalVmName  = Get-TfVar "final_instance_name"
 
 # Variáveis de destino (opcionais — para prévia da migração)
 $TargetFamily  = Get-TfVar "target_machine_family"
@@ -324,7 +325,11 @@ if (-not [string]::IsNullOrEmpty($TargetFamily)) {
                   elseif ($TargetFamily -in @("m1","m2"))               { "VIRTIO_NET" }
                   else                                                   { "VIRTIO_NET (GVNIC opcional)" }
 
-    $TargetVm = "$SourceVm-$TargetFamily"
+    if (-not [string]::IsNullOrEmpty($FinalVmName)) {
+        $TargetVm = $FinalVmName
+    } else {
+        $TargetVm = "$SourceVm-$TargetFamily"
+    }
 
     Write-Divider
     Write-Row "VM destino"       $TargetVm       "Green"
